@@ -1,0 +1,27 @@
+# Fork-only: a Linux x86_64 build of this branch to try by hand. Not for upstream.
+name: Linux build
+on:
+  push:
+    branches: [linux-build]
+permissions:
+  contents: read
+jobs:
+  build:
+    # Ubuntu 22.04 for an older glibc (2.35), so the binary also runs on
+    # Debian 12 and newer, Ubuntu 22.04 and newer, and WSL2.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: GUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libpipewire-0.3-dev clang libclang-dev cmake perl
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --locked --release --features demo
+      # A tarball keeps the executable bit, which an artifact zip drops.
+      - run: tar czf zapfast-linux-x86_64.tar.gz -C target/release zapfast
+      - uses: actions/upload-artifact@v7
+        with:
+          name: zapfast-linux-x86_64
+          path: zapfast-linux-x86_64.tar.gz
