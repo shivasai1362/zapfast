@@ -1,0 +1,19 @@
+# Fork-only: a Windows build of this branch to try by hand. Not for upstream.
+name: Windows build
+on:
+  push:
+    branches: [windows-build]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --locked --release --features demo
+      - uses: actions/upload-artifact@v7
+        with:
+          name: zapfast-windows-x64
+          path: target/release/zapfast.exe
