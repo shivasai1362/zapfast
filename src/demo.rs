@@ -20066,10 +20066,140 @@ mod tests {
         );
     }
 
+    /// One pass at the demo's window size, returning what it copied.
+    fn copy_pass(app: &mut App, ctx: &egui::Context, events: Vec<egui::Event>) -> Vec<String> {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1180.0, 780.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            app.background_frame(ui.ctx());
+            app.frame_ui(ui);
+        });
+        output.textures_delta.clear();
+        output
+            .platform_output
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Presses and releases `button` at `pos`, then draws once more, and
+    /// returns what the release copied.
+    fn click_and_copy(
+        app: &mut App,
+        ctx: &egui::Context,
+        pos: egui::Pos2,
+        button: egui::PointerButton,
+    ) -> Vec<String> {
+        let press = |pressed| egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let down = vec![egui::Event::PointerMoved(pos), press(true)];
+        copy_pass(app, ctx, down);
+        let copied = copy_pass(app, ctx, vec![press(false)]);
+        copy_pass(app, ctx, Vec::new());
+        copied
+    }
+
+    /// Right-clicks the start of the text `text_owner` draws among `rows`,
+    /// and returns what Copy link copies in the menu of `menu_owner` that
+    /// opens.
+    fn copy_link_of(rows: Vec<Message>, text_owner: &str, menu_owner: &str) -> Vec<String> {
+        let mut app = app();
+        let chat = SAMPLES[0].id;
+        app.conversations.get_mut(chat).unwrap().messages = rows;
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        for _ in 0..4 {
+            render(&mut app, &ctx);
+        }
+        let secondary = egui::PointerButton::Secondary;
+        let primary = egui::PointerButton::Primary;
+        let text = crate::ui::conversation::bubble_id(chat, text_owner);
+        let body = ctx
+            .data(|data| data.get_temp::<egui::Rect>(text.with("body")))
+            .unwrap_or_else(|| panic!("{text_owner} is on screen"));
+        // The text's first row, where the link starts.
+        let on_link = egui::pos2(body.left() + 6.0, body.top() + 8.0);
+        click_and_copy(&mut app, &ctx, on_link, secondary);
+        let menu = crate::ui::conversation::bubble_id(chat, menu_owner);
+        assert!(
+            egui::Popup::is_id_open(&ctx, menu.with("popup")),
+            "{text_owner}: the menu of {menu_owner} opens"
+        );
+        let link = crate::ui::conversation::menu_link_id(chat, menu_owner);
+        let item = ctx
+            .data(|data| data.get_temp::<egui::Rect>(link.with("item")))
+            .unwrap_or_else(|| panic!("{text_owner}: Copy link is drawn"));
+        click_and_copy(&mut app, &ctx, item.center(), primary)
+    }
+
+    /// Copy link also reaches text that another message draws: a link in a
+    /// later album member's caption is offered in the album's menu, and a link
+    /// in a carousel card in its carousel message's.
+    #[test]
+    fn right_click_on_a_grouped_link_offers_copy_link() {
+        let chat = SAMPLES[0].id;
+        let picture = |id: &str, caption: Option<&str>| {
+            let content = Content::Image {
+                motion: None,
+                caption: caption.map(str::to_owned),
+                media: crate::model::Media {
+                    mime: "image/jpeg".into(),
+                    size: 1,
+                    width: Some(640),
+                    height: Some(480),
+                    album: Some("copy-link-album".into()),
+                    path: None,
+                    state: crate::model::MediaState::Idle,
+                },
+            };
+            message(chat, id, false, 1_700_000_000, content)
+        };
+        let album = vec![
+            picture("album-1", None),
+            picture("album-2", Some("https://example.com/album and more")),
+        ];
+        assert_eq!(
+            copy_link_of(album, "album-2", "album-1"),
+            ["https://example.com/album"]
+        );
+
+        let card = crate::model::InteractiveCard {
+            body: "https://example.com/card and more".into(),
+            ..Default::default()
+        };
+        let carousel = Content::Interactive {
+            text: "Pick a link".into(),
+            card: Some(Box::new(crate::model::InteractiveCard {
+                body: "Pick a link".into(),
+                carousel: vec![card],
+                ..Default::default()
+            })),
+        };
+        let carousel = message(chat, "carousel", false, 1_700_000_000, carousel);
+        assert_eq!(
+            copy_link_of(vec![carousel], "carousel-card-0", "carousel"),
+            ["https://example.com/card"]
+        );
+    }
+
     /// A right-click on a web link or a mail address adds Copy link to the
     /// message menu, which copies the address (a mail address without its
-    /// `mailto:`). A right-click elsewhere in the message leaves it out, also
-    /// after a right-click on the link opened the menu before.
+    /// `mailto:`, in any case). A right-click elsewhere in the message leaves
+    /// it out, also after a right-click on the link opened the menu before.
     #[test]
     fn right_click_on_a_link_offers_copy_link() {
         for (text, copied) in [
@@ -20078,6 +20208,7 @@ mod tests {
                 "https://example.com/page",
             ),
             ("ada@example.com then plain words", "ada@example.com"),
+            ("MAILTO:ada@example.com then words", "ada@example.com"),
         ] {
             let mut app = app();
             let chat = SAMPLES[0].id.to_owned();
@@ -20099,47 +20230,12 @@ mod tests {
             let body = ctx
                 .data(|data| data.get_temp::<egui::Rect>(id.with("body")))
                 .expect("the message is on screen");
-            let mut run = |events: Vec<egui::Event>| {
-                let input = egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(1180.0, 780.0),
-                    )),
-                    events,
-                    ..Default::default()
-                };
-                let mut output = ctx.run_ui(input, |ui| {
-                    app.background_frame(ui.ctx());
-                    app.frame_ui(ui);
-                });
-                output.textures_delta.clear();
-                output
-                    .platform_output
-                    .commands
-                    .into_iter()
-                    .filter_map(|command| match command {
-                        egui::OutputCommand::CopyText(text) => Some(text),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let press = |pos, button, pressed| egui::Event::PointerButton {
-                pos,
-                button,
-                pressed,
-                modifiers: egui::Modifiers::NONE,
-            };
             let secondary = egui::PointerButton::Secondary;
             let primary = egui::PointerButton::Primary;
 
             // On the link, at the start of the text.
             let on_link = egui::pos2(body.left() + 6.0, body.center().y);
-            run(vec![
-                egui::Event::PointerMoved(on_link),
-                press(on_link, secondary, true),
-            ]);
-            run(vec![press(on_link, secondary, false)]);
-            run(Vec::new());
+            click_and_copy(&mut app, &ctx, on_link, secondary);
             assert!(
                 egui::Popup::is_id_open(&ctx, id.with("popup")),
                 "{text}: menu open"
@@ -20147,23 +20243,12 @@ mod tests {
             let item = ctx
                 .data(|data| data.get_temp::<egui::Rect>(link_id.with("item")))
                 .unwrap_or_else(|| panic!("{text}: Copy link is drawn"));
-            let at = item.center();
-            run(vec![
-                egui::Event::PointerMoved(at),
-                press(at, primary, true),
-            ]);
-            let copies = run(vec![press(at, primary, false)]);
+            let copies = click_and_copy(&mut app, &ctx, item.center(), primary);
             assert_eq!(copies, [copied], "{text}: Copy link copies the address");
-            run(Vec::new());
 
             // On plain words, at the end of the same text.
             let plain = egui::pos2(body.right() - 6.0, body.center().y);
-            run(vec![
-                egui::Event::PointerMoved(plain),
-                press(plain, secondary, true),
-            ]);
-            run(vec![press(plain, secondary, false)]);
-            run(Vec::new());
+            click_and_copy(&mut app, &ctx, plain, secondary);
             assert!(
                 egui::Popup::is_id_open(&ctx, id.with("popup")),
                 "{text}: menu open again"

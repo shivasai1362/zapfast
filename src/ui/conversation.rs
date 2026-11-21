@@ -5378,6 +5378,12 @@ pub fn menu_link_id(chat: &str, message: &str) -> egui::Id {
     bubble_id(chat, message).with("menu-link")
 }
 
+/// The link a right-click landed on, with its pass, for whichever bubble's
+/// menu that right-click opens.
+fn right_clicked_link_id() -> egui::Id {
+    egui::Id::new("right-clicked-link")
+}
+
 /// Where a voice message's speed chip was drawn, for interaction tests.
 pub fn speed_chip_id(chat: &str, message: &str) -> egui::Id {
     egui::Id::new(("speed-chip", chat, message))
@@ -5839,19 +5845,23 @@ fn bubble_frame(
     let keyboard_clicked =
         bubble.clicked() && bubble.has_focus() && !ui.input(|input| input.pointer.any_click());
     // Each opening decides afresh whether the menu offers Copy link: only a
-    // right-click on a link, recorded by the body earlier in this pass, does.
+    // right-click on a link, recorded by a body earlier in this pass (this
+    // message's text, an album member's caption or a carousel card), does.
     if right_clicked || keyboard_clicked || force_menu {
         let link_id = menu_link_id(&view.chat.id, &menu_target.id);
         let pass = ui.ctx().cumulative_pass_nr();
-        let on_link = right_clicked
-            && ui
-                .ctx()
-                .data(|data| data.get_temp::<(u64, String)>(link_id))
-                .is_some_and(|(at, _)| at == pass);
-        if !on_link {
-            ui.ctx()
-                .data_mut(|data| data.remove::<(u64, String)>(link_id));
-        }
+        let clicked = ui
+            .ctx()
+            .data(|data| data.get_temp::<(u64, String)>(right_clicked_link_id()))
+            .filter(|(at, _)| right_clicked && *at == pass);
+        ui.ctx().data_mut(|data| match clicked {
+            Some(link) => {
+                data.insert_temp(link_id, link);
+            }
+            None => {
+                data.remove::<(u64, String)>(link_id);
+            }
+        });
     }
     let popup_id = bubble_id.with("popup");
     let was_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
@@ -7552,8 +7562,7 @@ fn context_menu(
             data.insert_temp(menu_link_id(chat, &message.id).with("item"), item_rect);
         });
         if clicked {
-            let link = link.strip_prefix("mailto:").unwrap_or(&link);
-            actions.push(Action::CopyText(link.to_owned()));
+            actions.push(Action::CopyText(copied_link(&link).to_owned()));
         }
     }
     let age = view.now - message.timestamp;
@@ -7930,6 +7939,15 @@ pub(crate) fn revoke_refusal_said(locale: crate::i18n::Locale, blocker: RevokeBl
             ("reason", &blocker.said(locale)),
         ],
     )
+}
+
+/// What the menu's "Copy link" copies: the address the link opens, and a
+/// mail address without its `mailto:`, however a message spelled it.
+fn copied_link(link: &str) -> &str {
+    match link.split_at_checked("mailto:".len()) {
+        Some((scheme, address)) if scheme.eq_ignore_ascii_case("mailto:") => address,
+        _ => link,
+    }
 }
 
 /// What the menu's "Copy text" copies, before mentions are resolved: the
@@ -9933,16 +9951,16 @@ fn rich_body(
             if !url.starts_with("tel:") && response.clicked() {
                 actions.push(Action::OpenUrl(url.to_owned()));
             }
-            // The message menu, opened by this same right-click later in the
-            // pass, offers to copy the link under the pointer. A phone number
-            // has its own menu with Copy number.
+            // The menu this same right-click opens later in the pass offers to
+            // copy the link under the pointer. The text's own message is not
+            // always the menu's: an album caption may belong to a later
+            // member, and a carousel card draws as a stand-in, so the bubble
+            // takes the link from one shared slot. A phone number has its own
+            // menu with Copy number.
             if !url.starts_with("tel:") && ui.input(|input| input.pointer.secondary_clicked()) {
                 let pass = ui.ctx().cumulative_pass_nr();
                 ui.ctx().data_mut(|data| {
-                    data.insert_temp(
-                        menu_link_id(&view.chat.id, &message.id),
-                        (pass, url.to_owned()),
-                    );
+                    data.insert_temp(right_clicked_link_id(), (pass, url.to_owned()));
                 });
             }
         }
